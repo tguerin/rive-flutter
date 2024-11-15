@@ -113,7 +113,6 @@ class RiveFile {
 
   Backboard _backboard = Backboard.unknown;
   final _artboards = <Artboard>[];
-  final FileAssetLoader? _assetLoader;
 
   // List of core file types
   static final indexToField = <CoreFieldType>[
@@ -162,11 +161,33 @@ class RiveFile {
     return false;
   }
 
+  late final List<Core<CoreContext>?> _objectCache;
+  bool _cached = false;
+
+  RiveFile._cached(
+    this.header,
+    List<Core<CoreContext>?> objectCache,
+    FileAssetLoader? assetLoader,
+  ) {
+    _objectCache = objectCache;
+    _cached = true;
+    _import(null, null, assetLoader);
+  }
+
   RiveFile._(
     BinaryReader reader,
     this.header,
     ObjectGenerator? generator,
-    this._assetLoader,
+    FileAssetLoader? assetLoader,
+  ) {
+    _objectCache = [];
+    _import(reader, generator, assetLoader);
+  }
+
+  void _import(
+    BinaryReader? reader,
+    ObjectGenerator? generator,
+    FileAssetLoader? assetLoader,
   ) {
     /// Property fields table of contents
     final propertyToField = _propertyToFieldLookup(header);
@@ -174,8 +195,27 @@ class RiveFile {
     int artboardId = 0;
     var artboardLookup = HashMap<int, Artboard>();
     var importStack = ImportStack();
-    while (!reader.isEOF) {
-      final object = _readRuntimeObject(reader, propertyToField, generator);
+    var cacheIndex = 0;
+    while ((!_cached && !reader!.isEOF) ||
+        (_cached && cacheIndex < _objectCache.length)) {
+      Core<CoreContext>? object;
+      if (!_cached) {
+        object = _readRuntimeObject(reader!, propertyToField, generator);
+        _objectCache.add(object);
+      } else {
+        try {
+          object = _objectCache[cacheIndex++];
+          if (object is Artboard) {
+            object = RuntimeArtboard();
+          } else if (object is NestedArtboardBase) {
+            object = RuntimeNestedArtboard();
+          } else if (object is! Backboard) {
+            object = object?.clone();
+          }
+        } on Exception catch (_) {
+          object = _objectCache[cacheIndex];
+        }
+      }
       if (object == null) {
         // See if there's an artboard on the stack, need to track the null
         // object as it'll still hold an id.
@@ -253,7 +293,7 @@ class RiveFile {
           // all these stack objects are resolvers. they get resolved.
           stackObject = FileAssetImporter(
             object as FileAsset,
-            _assetLoader,
+            assetLoader,
           );
           stackType = FileAssetBase.typeKey;
           break;
@@ -325,6 +365,15 @@ class RiveFile {
         }
       }
     }
+    _cached = true;
+  }
+
+  RiveFile clone(FileAssetLoader? assetLoader) {
+    return RiveFile._cached(
+      header,
+      _objectCache,
+      assetLoader,
+    );
   }
 
   /// Imports a Rive file from an array of bytes.
