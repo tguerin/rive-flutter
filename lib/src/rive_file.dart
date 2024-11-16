@@ -3,7 +3,7 @@ import 'dart:collection';
 import 'package:collection/collection.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
-import 'package:rive/src/asset_loader.dart';
+import 'package:rive/rive.dart';
 import 'package:rive/src/core/core.dart';
 import 'package:rive/src/core/field_types/core_field_type.dart';
 import 'package:rive/src/core/importers/viewmodel_instance_importer.dart';
@@ -12,8 +12,6 @@ import 'package:rive/src/generated/animation/any_state_base.dart';
 import 'package:rive/src/generated/animation/blend_state_transition_base.dart';
 import 'package:rive/src/generated/animation/entry_state_base.dart';
 import 'package:rive/src/generated/animation/exit_state_base.dart';
-import 'package:rive/src/generated/assets/font_asset_base.dart';
-import 'package:rive/src/generated/nested_artboard_base.dart';
 import 'package:rive/src/generated/text/text_base.dart';
 import 'package:rive/src/local_file_io.dart'
     if (dart.library.js_interop) 'package:rive/src/local_file_web.dart';
@@ -22,23 +20,15 @@ import 'package:rive/src/rive_core/animation/blend_state_direct.dart';
 import 'package:rive/src/rive_core/animation/keyed_object.dart';
 import 'package:rive/src/rive_core/animation/keyed_property.dart';
 import 'package:rive/src/rive_core/animation/layer_state.dart';
-import 'package:rive/src/rive_core/animation/linear_animation.dart';
 import 'package:rive/src/rive_core/animation/nested_state_machine.dart';
-import 'package:rive/src/rive_core/animation/state_machine.dart';
 import 'package:rive/src/rive_core/animation/state_machine_layer.dart';
 import 'package:rive/src/rive_core/animation/state_machine_layer_component.dart';
 import 'package:rive/src/rive_core/animation/state_machine_listener.dart';
 import 'package:rive/src/rive_core/animation/state_transition.dart';
-import 'package:rive/src/rive_core/artboard.dart';
-import 'package:rive/src/rive_core/assets/audio_asset.dart';
 import 'package:rive/src/rive_core/assets/file_asset.dart';
-import 'package:rive/src/rive_core/assets/image_asset.dart';
 import 'package:rive/src/rive_core/backboard.dart';
 import 'package:rive/src/rive_core/component.dart';
-import 'package:rive/src/rive_core/runtime/exceptions/rive_format_error_exception.dart';
 import 'package:rive/src/rive_core/runtime/runtime_header.dart';
-import 'package:rive/src/rive_core/viewmodel/viewmodel_instance.dart';
-import 'package:rive/src/runtime_nested_artboard.dart';
 import 'package:rive_common/rive_text.dart';
 import 'package:rive_common/utilities.dart';
 
@@ -113,7 +103,6 @@ class RiveFile {
 
   Backboard _backboard = Backboard.unknown;
   final _artboards = <Artboard>[];
-  final FileAssetLoader? _assetLoader;
 
   // List of core file types
   static final indexToField = <CoreFieldType>[
@@ -162,11 +151,33 @@ class RiveFile {
     return false;
   }
 
+  late final List<Core<CoreContext>?> _objectCache;
+  bool _cached = false;
+
+  RiveFile._cached(
+    this.header,
+    List<Core<CoreContext>?> objectCache,
+    FileAssetLoader? assetLoader,
+  ) {
+    _objectCache = objectCache;
+    _cached = true;
+    _import(null, null, assetLoader);
+  }
+
   RiveFile._(
     BinaryReader reader,
     this.header,
     ObjectGenerator? generator,
-    this._assetLoader,
+    FileAssetLoader? assetLoader,
+  ) {
+    _objectCache = [];
+    _import(reader, generator, assetLoader);
+  }
+
+  void _import(
+    BinaryReader? reader,
+    ObjectGenerator? generator,
+    FileAssetLoader? assetLoader,
   ) {
     /// Property fields table of contents
     final propertyToField = _propertyToFieldLookup(header);
@@ -174,8 +185,21 @@ class RiveFile {
     int artboardId = 0;
     var artboardLookup = HashMap<int, Artboard>();
     var importStack = ImportStack();
-    while (!reader.isEOF) {
-      final object = _readRuntimeObject(reader, propertyToField, generator);
+    var cacheIndex = 0;
+    final context = RuntimeArtboard();
+    while ((!_cached && !reader!.isEOF) ||
+        (_cached && cacheIndex < _objectCache.length)) {
+      Core<CoreContext>? object;
+      if (!_cached) {
+        object = _readRuntimeObject(reader!, propertyToField, generator);
+        object?.context = context;
+        _objectCache.add(object);
+        object = object?.clone();
+      } else {
+        object = _objectCache[cacheIndex++];
+        object?.context = context;
+        object = object?.clone();
+      }
       if (object == null) {
         // See if there's an artboard on the stack, need to track the null
         // object as it'll still hold an id.
@@ -253,7 +277,7 @@ class RiveFile {
           // all these stack objects are resolvers. they get resolved.
           stackObject = FileAssetImporter(
             object as FileAsset,
-            _assetLoader,
+            assetLoader,
           );
           stackType = FileAssetBase.typeKey;
           break;
@@ -325,6 +349,15 @@ class RiveFile {
         }
       }
     }
+    _cached = true;
+  }
+
+  RiveFile clone(FileAssetLoader? assetLoader) {
+    return RiveFile._cached(
+      header,
+      _objectCache,
+      assetLoader,
+    );
   }
 
   /// Imports a Rive file from an array of bytes.
